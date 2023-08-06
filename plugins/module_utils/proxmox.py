@@ -180,3 +180,9 @@ class ProxmoxAnsible(object):
             return self.proxmox_api.storage.get(type=type)
         except Exception as e:
             self.module.fail_json(msg="Unable to retrieve storages information with type %s: %s" % (type, e))
+
+    def get_zone(self, zone):
+        try:
+            return self.proxmox_api.sdn.zones(zone).get()
+        except Exception as e:
+            self.module.fail_json(msg="Unable to retrieve storages information with type %s: %s" % (type, e))
