@@ -33,15 +33,20 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         """
         return not any( vnet["zone"] == sdnid for vnet in self.proxmox_api.cluster.sdn.vnets.get())
 
-    def create_zone(self, zone, update):
+    def create_zone(self, zone, update, apply):
         """Create Proxmox VE sdn
 
         :param sdnid: str - name of the sdn
         :return: None
         """
         if self.is_sdn_existing(zone["id"]):
-            if not update:
+            # Ugly ifs
+            if not update and not apply:
                 self.module.exit_json(changed=False, id=zone["id"], msg="sdn {0} already exists".format(zone["id"]))
+            if apply:
+                self.apply_changes()
+                # TODO: how do we now that something has changed?
+                self.module.exit_json(changed=True, msg="Changes applied")
         if self.module.check_mode:
             return
 
@@ -52,7 +57,11 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
             zone_copy.pop("type")
             self.proxmox_api.cluster.sdn.zones(zone_id).set(**zone_copy, **additionals)
         else:
-            self.proxmox_api.cluster.sdn.zones(zone_id).post(**zone_copy, **additionals)
+            self.proxmox_api.cluster.sdn.zones().post(zone=zone_id, **zone_copy, **additionals)
+        
+        if apply:
+            self.apply_changes()
+        
 
     def delete_zone(self, sdnid):
         """Delete Proxmox VE sdn
@@ -74,13 +83,48 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         else:
             self.module.fail_json(msg="Can't delete sdn {0} with members. Please remove members from sdn first.".format(sdnid))
 
+    def is_vnet_existing(self, vnet_id):
+        try:
+            vnets = self.proxmox_api.cluster.sdn.vnets.get()
+            return any(vnet['vnet'] == vnet_id for vnet in vnets)
+        except Exception as e:
+            self.module.fail_json(msg="Unable to retrieve vnets: {0}".format(e))
+
+
+    def create_vnet(self, vnet, zone, update, apply,
+                     alias=None, tag=None, type=None, vlanaware=False):
+        if not self.is_sdn_existing(zone):
+            self.module.fail_json(msg="SDN {0} doesn't exist".format(zone))
+        if self.is_vnet_existing(vnet):
+            # Ugly ifs
+            if not update and not apply:
+                self.module.exit_json(changed=False, id=vnet, msg="Vnet {0} already exists".format(vnet))
+            if apply:
+                self.apply_changes()
+                # TODO: how do we now that something has changed?
+                self.module.exit_json(changed=True, msg="Changes applied")
+        if self.module.check_mode:
+            return
+        
+        if update:
+            self.proxmox_api.cluster.sdn.vnets(vnet).set(
+                zone=zone, alias=alias, tag=tag, type=type, vlanaware=vlanaware
+                )
+        else:
+            self.proxmox_api.cluster.sdn.vnets.post(vnet=vnet,
+                zone=zone, alias=alias, tag=tag, type=type, vlanaware=vlanaware)
+        
+        if apply:
+            self.apply_changes()
+
+
     def apply_changes(self):
         taskid = self.proxmox_api.cluster.sdn.set()
         timeout = self.module.params['timeout']
-        nodes = self.proxmox_api.resources.get(type="node")
+        nodes = self.proxmox_api.cluster.resources.get(type="node")
         import time
         while timeout:
-            all_ok = all(self.api_task_ok(node, taskid) for node in nodes)
+            all_ok = all(self.api_task_ok(node["node"], taskid) for node in nodes)
             if all_ok:
                 # Wait an extra second as the API can be a ahead of the hypervisor
                 time.sleep(1)
@@ -105,6 +149,16 @@ def main():
                         bridge=dict(type="str"),
                         additionals=dict(type="dict"),
                     )),
+        vnets = dict(type='list', elements='dict'
+                    #  elements=dict(
+                    #     id=dict(type="str", required=True),
+                    #     zone=dict(type="str"),
+                    #     alias=dict(type="str"),
+                    #     tag=dict(type="int"),
+                    #     type=dict(type="str", choices=[""]),
+                    #     vlanaware=dict(type="bool"),
+                    #  )
+                     ),
     )
 
     module_args.update(sdn_args)
@@ -122,30 +176,32 @@ def main():
     state = module.params["state"]
     update = bool(module.params["update"])
     apply = bool(module.params["apply"])
-
+    vnets = list(module.params["vnets"])
     proxmox = ProxmoxSDNAnsible(module)
-    applied = False
+
     if state == "present":
         try:
-            proxmox.create_zone(zone=zone, update=update)
+            if zone:
+                proxmox.create_zone(zone=zone, update=update, apply=apply)
+                zone_info = proxmox.get_zone(zone["id"])
+            if vnets:
+                for vnet in vnets:
+                    proxmox.create_vnet(vnet=vnet["id"], zone=vnet["zone"], alias=vnet.get("alias"), type=vnet.get("type"), vlanaware=vnet.get("vlanaware"),apply=apply,update=update)
         except Exception as e:
             if update:
                 module.fail_json(msg="Unable to update sdn {0}. Reason: {1}".format(zone["id"], str(e)))
             else:
                 module.fail_json(msg="Unable to create sdn {0}. Reason: {1}".format(zone["id"], str(e)))
 
-        if apply:
-            proxmox.apply_changes()
-            applied = True
         if update:
-            module.exit_json(changed=True, id=zone["id"], applied=applied, msg="Zone {0} successfully updated".format(zone["id"]))
+            module.exit_json(changed=True, zone=zone_info, applied=apply, msg="Zone {0} successfully updated".format(zone["id"]))
         else:
-            module.exit_json(changed=True, id=zone["id"], applied=applied, msg="Zone {0} successfully created".format(zone["id"]))
+            module.exit_json(changed=True, zone=zone_info, applied=apply, msg="Zone {0} successfully created".format(zone["id"]))
     
     else:
         proxmox.delete_zone(zone["id"])
         proxmox.apply_changes()
-        module.exit_json(changed=True, id=zone["id"], applied=applied, msg="Zone {0} successfully deleted".format(zone["id"]))
+        module.exit_json(changed=True, id=zone["id"], applied=apply, msg="Zone {0} successfully deleted".format(zone["id"]))
 
 
 if __name__ == "__main__":
