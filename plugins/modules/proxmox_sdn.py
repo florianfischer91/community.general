@@ -11,6 +11,10 @@ from ansible_collections.community.general.plugins.module_utils.proxmox import (
 import urllib3
 urllib3.disable_warnings()
 
+import re
+# sdn_object_id = re.compile(r'^[a-z0-9_][a-z0-9_\-\+\.]*$')
+sdn_object_id = re.compile(r'^[a-z][a-z0-9]*$')
+
 class ProxmoxSDNAnsible(ProxmoxAnsible):
 
     def is_sdn_existing(self, sdnid):
@@ -44,14 +48,18 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
             if not update and not apply:
                 self.module.exit_json(changed=False, id=zone["id"], msg="sdn {0} already exists".format(zone["id"]))
             if apply:
-                self.apply_changes()
-                # TODO: how do we now that something has changed?
-                self.module.exit_json(changed=True, msg="Changes applied")
+                return False
+                # self.apply_changes()
+                # # TODO: how do we now that something has changed?
+                # self.module.exit_json(changed=True, msg="Changes applied")
         if self.module.check_mode:
             return
 
         zone_copy = dict(**zone)
         zone_id = zone_copy.pop("id")
+        if not sdn_object_id.match(zone_id):
+            self.module.fail_json(msg='{0} is not a valid sdn object identifier'.format(zone_id))
+
         additionals = zone_copy.pop("additionals", {})
         if update:
             zone_copy.pop("type")
@@ -59,8 +67,7 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         else:
             self.proxmox_api.cluster.sdn.zones().post(zone=zone_id, **zone_copy, **additionals)
         
-        if apply:
-            self.apply_changes()
+        return True      
         
 
     def delete_zone(self, sdnid):
@@ -97,7 +104,7 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
             self.module.fail_json(msg="SDN {0} doesn't exist".format(zone))
         if self.is_vnet_existing(vnet):
             # Ugly ifs
-            if not update and not apply:
+            if not update and not apply: # TODO exit not possible if we have multiple vnets...
                 self.module.exit_json(changed=False, id=vnet, msg="Vnet {0} already exists".format(vnet))
             if apply:
                 self.apply_changes()
@@ -106,6 +113,9 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         if self.module.check_mode:
             return
         
+        if not sdn_object_id.match(vnet): # TODO should we do the check before creating zones and other vnets?
+            self.module.fail_json(msg='{0} is not a valid sdn object identifier'.format(vnet))
+
         if update:
             self.proxmox_api.cluster.sdn.vnets(vnet).set(
                 zone=zone, alias=alias, tag=tag, type=type, vlanaware=vlanaware
@@ -179,24 +189,30 @@ def main():
     vnets = list(module.params["vnets"])
     proxmox = ProxmoxSDNAnsible(module)
 
+    data = {}
+    pending_changes = False
     if state == "present":
         try:
             if zone:
-                proxmox.create_zone(zone=zone, update=update, apply=apply)
+                pending_changes |= proxmox.create_zone(zone=zone, update=update, apply=apply)
                 zone_info = proxmox.get_zone(zone["id"])
+                data["msg"] = "Zone {0} successfully {1}.".format(zone["id"], "updated" if update else "created")
+                data["zone"] = zone_info
             if vnets:
                 for vnet in vnets:
                     proxmox.create_vnet(vnet=vnet["id"], zone=vnet["zone"], alias=vnet.get("alias"), type=vnet.get("type"), vlanaware=vnet.get("vlanaware"),apply=apply,update=update)
+                    data["msg"] = "Vnet {0} successfully {1}.".format(zone["id"], "updated" if update else "created")
+
         except Exception as e:
             if update:
-                module.fail_json(msg="Unable to update sdn {0}. Reason: {1}".format(zone["id"], str(e)))
+                module.fail_json(msg="Unable to update sdn objects. Reason: {0}".format(str(e)))
             else:
-                module.fail_json(msg="Unable to create sdn {0}. Reason: {1}".format(zone["id"], str(e)))
-
-        if update:
-            module.exit_json(changed=True, zone=zone_info, applied=apply, msg="Zone {0} successfully updated".format(zone["id"]))
-        else:
-            module.exit_json(changed=True, zone=zone_info, applied=apply, msg="Zone {0} successfully created".format(zone["id"]))
+                module.fail_json(msg="Unable to create sdn objects. Reason: {0}".format(str(e)))
+        data["changed"] = True
+        if apply:
+            proxmox.apply_changes()
+            data["msg"] += " Changes applied."
+        module.exit_json(applied=apply, **data)
     
     else:
         proxmox.delete_zone(zone["id"])
