@@ -101,7 +101,8 @@ class TestProxmoxSdnModule(ModuleTestCase):
         assert result["failed"] is True
         assert result["msg"] == "1test is not a valid sdn object identifier"
 
-    def test_module_exits_changed_when_zone_created(self):
+    @patch.object(proxmox_sdn.ProxmoxSDNAnsible, "apply_changes")
+    def test_module_exits_changed_when_zone_created(self, apply_changes_mock: MagicMock):
         set_module_args(
             {
                 "api_host": "host",
@@ -119,8 +120,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
         )
 
         self.is_sdn_existing_mock.return_value = False
-        post_zones = MagicMock()
-        self.connect_mock.return_value.cluster.sdn.zones.post = post_zones
+        post_zones: MagicMock = self.connect_mock.return_value.cluster.sdn.zones.post
         
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
@@ -131,6 +131,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
         assert result["msg"] == "Zone test successfully created."
         assert self.is_sdn_existing_mock.call_count == 1
         post_zones.assert_called_once_with(zone="test", type="vlan", bridge="vmbr0", mtu="1450")
+        assert apply_changes_mock.call_count == 0
 
     def test_module_exits_changed_when_zone_updated(self):
         set_module_args(
@@ -151,10 +152,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
         )
 
         self.is_sdn_existing_mock.return_value = True
-        set_zones_mock = MagicMock()
-        zones_mock = MagicMock()
-        zones_mock.return_value.set = set_zones_mock
-        self.connect_mock.return_value.cluster.sdn.zones = zones_mock
+        zones_mock: MagicMock = self.connect_mock.return_value.cluster.sdn.zones
         
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
@@ -166,4 +164,140 @@ class TestProxmoxSdnModule(ModuleTestCase):
         assert self.is_sdn_existing_mock.call_count == 1
         assert zones_mock.call_count == 2 # one when calling the set-function, 2nd call when getting zone-info
         zones_mock.assert_called_with("exists")
-        set_zones_mock.assert_called_once_with(bridge="vmbr0", mtu="1450") 
+        zones_mock.return_value.set.assert_called_once_with(bridge="vmbr0", mtu="1450") 
+
+    def test_module_exits_failed_when_zone_updated_does_not_exist(self):
+        set_module_args(
+            {
+                "api_host": "host",
+                "api_user": "user",
+                "api_password": "password",
+                "zone": {
+                    "id": "exists",
+                    "type": "vlan",
+                    "bridge": "vmbr0",
+                },
+                "update": True
+            }
+        )
+
+        self.is_sdn_existing_mock.return_value = False
+        
+        with pytest.raises(AnsibleFailJson) as exc_info:
+            self.module.main()
+
+        result = exc_info.value.args[0]
+        
+        assert result["failed"] is True
+        assert result["msg"] == "Zone object exists does not exist"
+        assert self.is_sdn_existing_mock.call_count == 1
+
+    def test_module_exits_changed_when_zone_deleted(self):
+        set_module_args(
+            {
+                "api_host": "host",
+                "api_user": "user",
+                "api_password": "password",
+                "zone": {
+                    "id": "exists"               
+                },
+                "state": "absent"
+            }
+        )
+
+        self.is_sdn_existing_mock.return_value = True
+        zones_mock = self.connect_mock.return_value.cluster.sdn.zones
+                
+        with pytest.raises(AnsibleExitJson) as exc_info:
+            self.module.main()
+
+        result = exc_info.value.args[0]
+        
+        assert result["changed"] is True
+        assert result["msg"] == "Zone exists successfully deleted"
+        assert self.is_sdn_existing_mock.call_count == 1
+        zones_mock.assert_called_once_with("exists")
+        assert zones_mock.return_value.delete.call_count == 1
+
+    def test_module_exits_unchanged_when_zone_deleted_does_not_exist(self):
+        set_module_args(
+            {
+                "api_host": "host",
+                "api_user": "user",
+                "api_password": "password",
+                "zone": {
+                    "id": "exists"               
+                },
+                "state": "absent"
+            }
+        )
+
+        self.is_sdn_existing_mock.return_value = False
+        
+        with pytest.raises(AnsibleExitJson) as exc_info:
+            self.module.main()
+
+        result = exc_info.value.args[0]
+        
+        assert result["changed"] is False
+        assert result["msg"] == "sdn exists doesn't exist"
+        assert self.is_sdn_existing_mock.call_count == 1
+
+    def test_module_exits_failed_when_zone_deleted_vnet_belongs_to_zone(self):
+        set_module_args(
+            {
+                "api_host": "host",
+                "api_user": "user",
+                "api_password": "password",
+                "zone": {
+                    "id": "exists"               
+                },
+                "state": "absent"
+            }
+        )
+
+        self.is_sdn_existing_mock.return_value = True
+
+        with patch.object(
+            proxmox_sdn.ProxmoxSDNAnsible, "is_sdn_empty"
+        ) as is_sdn_empty_mock:
+            is_sdn_empty_mock.return_value = False
+            with pytest.raises(AnsibleFailJson) as exc_info:
+                self.module.main()
+
+        result = exc_info.value.args[0]
+        
+        assert result["failed"] is True
+        assert result["msg"] == "Can't delete sdn exists with vnets. Please remove vnets from sdn first."
+        assert self.is_sdn_existing_mock.call_count == 1
+        is_sdn_empty_mock.assert_called_once_with("exists")
+
+    @patch.object(proxmox_sdn.ProxmoxSDNAnsible, "create_zone")
+    @patch.object(proxmox_sdn.ProxmoxSDNAnsible, "apply_changes")
+    def test_module_exits_changed_when_apply_true(self, create_zone_mock: MagicMock, apply_changes_mock: MagicMock):
+        set_module_args(
+            {
+                "api_host": "host",
+                "api_user": "user",
+                "api_password": "password",
+                "zone": {
+                    "id": "exists",
+                    "type": "vlan",
+                    "bridge": "vmbr0",
+                    "additionals": {
+                        "mtu": "1450"
+                    }
+                },
+                "apply": True
+            }
+        )
+        create_zone_mock.return_value = True
+        
+        with pytest.raises(AnsibleExitJson) as exc_info:
+            self.module.main()
+
+        result = exc_info.value.args[0]
+        
+        assert result["changed"] is True
+        assert result["msg"] == "Zone exists successfully created. Changes applied."
+        assert apply_changes_mock.call_count == 1

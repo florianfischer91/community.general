@@ -93,7 +93,7 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
             except Exception as e:
                 self.module.fail_json(msg="Failed to delete sdn with ID {0}: {1}".format(sdnid, e))
         else:
-            self.module.fail_json(msg="Can't delete sdn {0} with members. Please remove members from sdn first.".format(sdnid))
+            self.module.fail_json(msg="Can't delete sdn {0} with vnets. Please remove vnets from sdn first.".format(sdnid))
 
     def is_vnet_existing(self, vnet_id):
         try:
