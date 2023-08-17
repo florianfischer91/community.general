@@ -6,7 +6,7 @@ __metaclass__ = type
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.community.general.plugins.module_utils.proxmox import (proxmox_auth_argument_spec, ProxmoxAnsible)
-
+from proxmoxer import ResourceException
 
 import urllib3
 urllib3.disable_warnings()
@@ -43,6 +43,7 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         :param sdnid: str - name of the sdn
         :return: None
         """
+        sdn_exists = False
         if self.is_sdn_existing(zone["id"]):
             # Ugly ifs
             if not update and not apply:
@@ -52,6 +53,7 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
                 # self.apply_changes()
                 # # TODO: how do we now that something has changed?
                 # self.module.exit_json(changed=True, msg="Changes applied")
+            sdn_exists = True
         if self.module.check_mode:
             return
 
@@ -60,12 +62,15 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         if not sdn_object_id.match(zone_id):
             self.module.fail_json(msg='{0} is not a valid sdn object identifier'.format(zone_id))
 
-        additionals = zone_copy.pop("additionals", {})
+        additionals = zone_copy.pop("additionals")
         if update:
+            if not sdn_exists:
+                self.module.fail_json(msg='Zone object {0} does not exist'.format(zone["id"]))
+
             zone_copy.pop("type")
             self.proxmox_api.cluster.sdn.zones(zone_id).set(**zone_copy, **additionals)
         else:
-            self.proxmox_api.cluster.sdn.zones().post(zone=zone_id, **zone_copy, **additionals)
+            self.proxmox_api.cluster.sdn.zones.post(zone=zone_id, **zone_copy, **additionals)
         
         return True      
         
@@ -157,9 +162,9 @@ def main():
                         id=dict(type="str", required=True),
                         type=dict(type="str", choices=["simple", "vlan"]),
                         bridge=dict(type="str"),
-                        additionals=dict(type="dict"),
+                        additionals=dict(type="dict", default= {}),
                     )),
-        vnets = dict(type='list', elements='dict'
+        vnets = dict(type='list', elements='dict',default=[]
                     #  elements=dict(
                     #     id=dict(type="str", required=True),
                     #     zone=dict(type="str"),
@@ -200,10 +205,13 @@ def main():
                 data["zone"] = zone_info
             if vnets:
                 for vnet in vnets:
-                    proxmox.create_vnet(vnet=vnet["id"], zone=vnet["zone"], alias=vnet.get("alias"), type=vnet.get("type"), vlanaware=vnet.get("vlanaware"),apply=apply,update=update)
+                    if zone["type"] == "vlan" and not vnet.get("tag"):
+                        module.fail_json(msg="missing vlan tag")
+
+                    proxmox.create_vnet(vnet=vnet["id"], zone=vnet["zone"], alias=vnet.get("alias"),tag=vnet.get("tag"), type=vnet.get("type"), vlanaware=vnet.get("vlanaware"),apply=apply,update=update)
                     data["msg"] = "Vnet {0} successfully {1}.".format(zone["id"], "updated" if update else "created")
 
-        except Exception as e:
+        except ResourceException as e:
             if update:
                 module.fail_json(msg="Unable to update sdn objects. Reason: {0}".format(str(e)))
             else:
