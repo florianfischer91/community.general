@@ -134,6 +134,10 @@ class TestProxmoxSdnModule(ModuleTestCase):
         assert apply_changes_mock.call_count == 0
 
     def test_module_exits_changed_when_zone_updated(self):
+        self._test_module_exits_changed_when_zone_updated("changed", True, "Zone exists successfully changed.")
+        self._test_module_exits_changed_when_zone_updated("", False, "Everything is up to date.")
+
+    def _test_module_exits_changed_when_zone_updated(self, state, changed, msg):
         set_module_args(
             {
                 "api_host": "host",
@@ -154,17 +158,23 @@ class TestProxmoxSdnModule(ModuleTestCase):
         self.is_sdn_existing_mock.return_value = True
         zones_mock: MagicMock = self.connect_mock.return_value.cluster.sdn.zones
         
+        zones_mock.return_value.get.return_value = {"state": state}
+        
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
 
         result = exc_info.value.args[0]
         
-        assert result["changed"] is True
-        assert result["msg"] == "Zone exists successfully updated."
+        assert result["changed"] is changed
+        zones_mock.return_value.get.assert_called_once_with(pending="1")
+        assert result["msg"] == msg
         assert self.is_sdn_existing_mock.call_count == 1
         assert zones_mock.call_count == 2 # one when calling the set-function, 2nd call when getting zone-info
         zones_mock.assert_called_with("exists")
-        zones_mock.return_value.set.assert_called_once_with(bridge="vmbr0", mtu="1450") 
+        zones_mock.return_value.set.assert_called_once_with(bridge="vmbr0", mtu="1450")
+        
+        zones_mock.reset_mock()
+        self.is_sdn_existing_mock.reset_mock()
 
     def test_module_exits_failed_when_zone_updated_does_not_exist(self):
         set_module_args(
@@ -299,5 +309,22 @@ class TestProxmoxSdnModule(ModuleTestCase):
         result = exc_info.value.args[0]
         
         assert result["changed"] is True
-        assert result["msg"] == "Zone exists successfully created. Changes applied."
+        assert result["msg"] == "Zone exists successfully created.\nPending changes applied."
         assert apply_changes_mock.call_count == 1
+
+    def test_create_zone_return_false_sdn_exists(self):
+        
+        self.is_sdn_existing_mock.return_value = True
+        sut = self.module.ProxmoxSDNAnsible(self.mock_module)
+        result = sut.create_zone({"id": "test"}, False, True)        
+        assert result is False
+
+    # def test_is_sdn_existing_return_false(self):
+        
+    #     # self.is_sdn_existing_mock.return_value = True
+    #     self.connect_mock.return_value.cluster.sdn.zones.get.return_value = [{"zone":"asdf"}]
+    #     sut = self.module.ProxmoxSDNAnsible(self.mock_module)
+    #     sut.is_sdn_existing.stop()
+    #     result = sut.is_sdn_existing("test")        
+    #     assert result is False
+    #     sut.is_sdn_existing.start()

@@ -41,19 +41,16 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         """Create Proxmox VE sdn
 
         :param sdnid: str - name of the sdn
-        :return: None
+        :return: True if we have created or potential changed a zone
         """
-        sdn_exists = False
+        zone_exists = False
         if self.is_sdn_existing(zone["id"]):
             # Ugly ifs
             if not update and not apply:
                 self.module.exit_json(changed=False, id=zone["id"], msg="sdn {0} already exists".format(zone["id"]))
-            if apply:
+            if not update and apply:
                 return False
-                # self.apply_changes()
-                # # TODO: how do we now that something has changed?
-                # self.module.exit_json(changed=True, msg="Changes applied")
-            sdn_exists = True
+            zone_exists = True
         if self.module.check_mode:
             return
 
@@ -64,7 +61,7 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
 
         additionals = zone_copy.pop("additionals")
         if update:
-            if not sdn_exists:
+            if not zone_exists:
                 self.module.fail_json(msg='Zone object {0} does not exist'.format(zone["id"]))
 
             zone_copy.pop("type")
@@ -111,10 +108,8 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
             # Ugly ifs
             if not update and not apply: # TODO exit not possible if we have multiple vnets...
                 self.module.exit_json(changed=False, id=vnet, msg="Vnet {0} already exists".format(vnet))
-            if apply:
-                self.apply_changes()
-                # TODO: how do we now that something has changed?
-                self.module.exit_json(changed=True, msg="Changes applied")
+            if not update and apply:
+                return False
         if self.module.check_mode:
             return
         
@@ -128,9 +123,7 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         else:
             self.proxmox_api.cluster.sdn.vnets.post(vnet=vnet,
                 zone=zone, alias=alias, tag=tag, type=type, vlanaware=vlanaware)
-        
-        if apply:
-            self.apply_changes()
+        return True
 
 
     def apply_changes(self):
@@ -164,15 +157,14 @@ def main():
                         bridge=dict(type="str"),
                         additionals=dict(type="dict", default= {}),
                     )),
-        vnets = dict(type='list', elements='dict',default=[]
-                    #  elements=dict(
-                    #     id=dict(type="str", required=True),
-                    #     zone=dict(type="str"),
-                    #     alias=dict(type="str"),
-                    #     tag=dict(type="int"),
-                    #     type=dict(type="str", choices=[""]),
-                    #     vlanaware=dict(type="bool"),
-                    #  )
+        vnet = dict(type='dict', 
+                     options=dict(
+                        id=dict(type="str", required=True),
+                        zone=dict(type="str", required=True),
+                        alias=dict(type="str"),
+                        tag=dict(type="int"),
+                        vlanaware=dict(type="bool"),
+                     )
                      ),
     )
 
@@ -191,36 +183,50 @@ def main():
     state = module.params["state"]
     update = bool(module.params["update"])
     apply = bool(module.params["apply"])
-    vnets = list(module.params["vnets"])
+    vnet = module.params["vnet"]
     proxmox = ProxmoxSDNAnsible(module)
 
-    data = {}
+    data = { }
+    msgs = []
     pending_changes = False
     if state == "present":
         try:
             if zone:
-                pending_changes |= proxmox.create_zone(zone=zone, update=update, apply=apply)
-                zone_info = proxmox.get_zone(zone["id"])
-                data["msg"] = "Zone {0} successfully {1}.".format(zone["id"], "updated" if update else "created")
-                data["zone"] = zone_info
-            if vnets:
-                for vnet in vnets:
-                    if zone["type"] == "vlan" and not vnet.get("tag"):
-                        module.fail_json(msg="missing vlan tag")
+                check_changes = proxmox.create_zone(zone=zone, update=update, apply=apply)
+                if check_changes:
+                    # get zone info's to check for pending changes
+                    zone_info = proxmox.proxmox_api.cluster.sdn.zones(zone["id"]).get(pending="1")
+                    state = zone_info.get("state")
+                    if state:
+                        pending_changes = True
+                        msgs.append("Zone {0} successfully {1}.".format(zone["id"], "changed" if state == "changed" else "created"))
 
-                    proxmox.create_vnet(vnet=vnet["id"], zone=vnet["zone"], alias=vnet.get("alias"),tag=vnet.get("tag"), type=vnet.get("type"), vlanaware=vnet.get("vlanaware"),apply=apply,update=update)
-                    data["msg"] = "Vnet {0} successfully {1}.".format(zone["id"], "updated" if update else "created")
+            if vnet:
+                if zone["type"] == "vlan" and not vnet.get("tag"):
+                    module.fail_json(msg="missing vlan tag")
+
+                check_changes = proxmox.create_vnet(vnet=vnet["id"], zone=vnet["zone"], alias=vnet.get("alias"),tag=vnet.get("tag"), type=vnet.get("type"), vlanaware=vnet.get("vlanaware"),apply=apply,update=update)
+                if check_changes:
+                    # get vnet info's to check for pending changes
+                    vnet_info = proxmox.proxmox_api.cluster.sdn.vnets(vnet["id"]).get(pending="1")
+                    state =  vnet_info.get("state", "")
+                    if state:
+                        pending_changes = True
+                        msgs.append("Vnet {0} successfully {1}.".format(vnet["id"], "updated" if update else "created"))
 
         except ResourceException as e:
             if update:
                 module.fail_json(msg="Unable to update sdn objects. Reason: {0}".format(str(e)))
             else:
                 module.fail_json(msg="Unable to create sdn objects. Reason: {0}".format(str(e)))
-        data["changed"] = True
-        if apply:
+        # if we have pending changes, we have changed something
+        data["changed"] = pending_changes
+        if pending_changes and apply:
             proxmox.apply_changes()
-            data["msg"] += " Changes applied."
-        module.exit_json(applied=apply, **data)
+            msgs.append("Pending changes applied.")
+        if not pending_changes:
+            msgs.append("Everything is up to date.")
+        module.exit_json(applied=apply, pending=pending_changes, **data, msg='\n'.join(msgs))
     
     else:
         proxmox.delete_zone(zone["id"])
