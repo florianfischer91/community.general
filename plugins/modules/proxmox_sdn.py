@@ -5,7 +5,7 @@ from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible_collections.community.general.plugins.module_utils.proxmox import (proxmox_auth_argument_spec, ProxmoxAnsible)
+from ansible_collections.community.general.plugins.module_utils.proxmox import (proxmox_auth_argument_spec, ansible_to_proxmox_bool, ProxmoxAnsible)
 from proxmoxer import ResourceException
 
 import urllib3
@@ -51,8 +51,6 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
             if not update and apply:
                 return False
             zone_exists = True
-        if self.module.check_mode:
-            return
 
         zone_copy = dict(**zone)
         zone_id = zone_copy.pop("id")
@@ -82,9 +80,6 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
             self.module.exit_json(changed=False, id=sdnid, msg="sdn {0} doesn't exist".format(sdnid))
 
         if self.is_sdn_empty(sdnid):
-            if self.module.check_mode:
-                return
-
             try:
                 self.proxmox_api.cluster.sdn.zones(sdnid).delete()
             except Exception as e:
@@ -106,23 +101,21 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
             self.module.fail_json(msg="SDN {0} doesn't exist".format(zone))
         if self.is_vnet_existing(vnet):
             # Ugly ifs
-            if not update and not apply: # TODO exit not possible if we have multiple vnets...
+            if not update and not apply:
                 self.module.exit_json(changed=False, id=vnet, msg="Vnet {0} already exists".format(vnet))
             if not update and apply:
                 return False
-        if self.module.check_mode:
-            return
         
-        if not sdn_object_id.match(vnet): # TODO should we do the check before creating zones and other vnets?
+        if not sdn_object_id.match(vnet): # TODO should we do the check before creating zone
             self.module.fail_json(msg='{0} is not a valid sdn object identifier'.format(vnet))
 
         if update:
             self.proxmox_api.cluster.sdn.vnets(vnet).set(
-                zone=zone, alias=alias, tag=tag, type=type, vlanaware=vlanaware
+                zone=zone, alias=alias, tag=tag, type=type, vlanaware=ansible_to_proxmox_bool(vlanaware)
                 )
         else:
             self.proxmox_api.cluster.sdn.vnets.post(vnet=vnet,
-                zone=zone, alias=alias, tag=tag, type=type, vlanaware=vlanaware)
+                zone=zone, alias=alias, tag=tag, type=type, vlanaware=ansible_to_proxmox_bool(vlanaware))
         return True
 
 
@@ -163,6 +156,7 @@ def main():
                         zone=dict(type="str", required=True),
                         alias=dict(type="str"),
                         tag=dict(type="int"),
+                        # type=dict(type="str"), # defined in api-doc but proxmox doesn't allow it
                         vlanaware=dict(type="bool"),
                      )
                      ),
@@ -176,7 +170,6 @@ def main():
         required_one_of=[("api_password", "api_token_id")],
         mutually_exclusive=[('delete', 'update')],
 
-        supports_check_mode=True
     )
 
     zone = module.params["zone"]
@@ -202,7 +195,7 @@ def main():
                         msgs.append("Zone {0} successfully {1}.".format(zone["id"], "changed" if state == "changed" else "created"))
 
             if vnet:
-                if zone["type"] == "vlan" and not vnet.get("tag"):
+                if vnet["zone"] == "vlan" and not vnet.get("tag"):
                     module.fail_json(msg="missing vlan tag")
 
                 check_changes = proxmox.create_vnet(vnet=vnet["id"], zone=vnet["zone"], alias=vnet.get("alias"),tag=vnet.get("tag"), type=vnet.get("type"), vlanaware=vnet.get("vlanaware"),apply=apply,update=update)
