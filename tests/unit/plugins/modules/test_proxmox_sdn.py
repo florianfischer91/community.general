@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from __future__ import absolute_import, division, print_function
+from unittest.mock import call
 
 __metaclass__ = type
 
@@ -186,7 +187,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
         )
 
         self.is_sdn_existing_mock.return_value = True
-        zones_mock = self.connect_mock.return_value.cluster.sdn.zones
+        zones_mock: MagicMock = self.connect_mock.return_value.cluster.sdn.zones
 
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
@@ -194,9 +195,9 @@ class TestProxmoxSdnModule(ModuleTestCase):
         result = exc_info.value.args[0]
 
         assert result["changed"] is True
-        assert result["msg"] == "Zone exists successfully deleted"
+        assert result["msg"] == "Zone exists deleted"
         assert self.is_sdn_existing_mock.call_count == 1
-        zones_mock.assert_called_once_with("exists")
+        zones_mock.assert_called_with("exists")
         assert zones_mock.return_value.delete.call_count == 1
 
     def test_module_exits_failed_when_zone_deleted_exception_raised(self):
@@ -244,7 +245,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
         assert result["msg"] == "sdn exists doesn't exist"
         assert self.is_sdn_existing_mock.call_count == 1
 
-    def test_module_exits_failed_when_zone_deleted_vnet_belongs_to_zone(self):
+    def test_module_exits_failed_when_zone_deleted_not_empty(self):
         set_module_args(
             {
                 **_api_args,
@@ -256,20 +257,49 @@ class TestProxmoxSdnModule(ModuleTestCase):
         self.is_sdn_existing_mock.return_value = True
 
         with patch.object(proxmox_sdn.ProxmoxSDNAnsible, "is_sdn_empty") as is_sdn_empty_mock:
-            is_sdn_empty_mock.return_value = False
+            is_sdn_empty_mock.return_value = True  # import to be evaluated to True from python
             with pytest.raises(AnsibleFailJson) as exc_info:
                 self.module.main()
 
         result = exc_info.value.args[0]
 
         assert result["failed"] is True
-        assert result["msg"] == "Can't delete sdn exists with vnets. Please remove vnets from sdn first."
+        assert (
+            result["msg"]
+            == "Can't delete sdn exists with vnets. Please remove vnets from sdn first or use `force: True`."
+        )
         assert self.is_sdn_existing_mock.call_count == 1
         is_sdn_empty_mock.assert_called_once_with("exists")
 
-    @patch.object(proxmox_sdn.ProxmoxSDNAnsible, "create_zone")
-    @patch.object(proxmox_sdn.ProxmoxSDNAnsible, "apply_changes")
-    def test_module_exits_changed_when_apply_true(self, create_zone_mock: MagicMock, apply_changes_mock: MagicMock):
+    @patch.multiple(proxmox_sdn.ProxmoxSDNAnsible, is_sdn_empty=DEFAULT, delete_vnet=DEFAULT)
+    def test_module_exits_changed_when_zone_deleted_not_empty_force(
+        self, delete_vnet: MagicMock, is_sdn_empty: MagicMock
+    ):
+        set_module_args({**_api_args, "zone": {"id": "exists"}, "state": "absent", "force": True})
+
+        self.is_sdn_existing_mock.return_value = True
+
+        is_sdn_empty.return_value = [{"vnet": "id1"}, {"vnet": "id2"}]
+        with pytest.raises(AnsibleExitJson) as exc_info:
+            self.module.main()
+
+        result = exc_info.value.args[0]
+
+        assert result["changed"] is True
+        # assert result["msg"] == "Can't delete sdn exists with vnets. Please remove vnets from sdn first or use `force: True`."
+        assert self.is_sdn_existing_mock.call_count == 1
+        is_sdn_empty.assert_called_once_with("exists")
+        delete_vnet.assert_has_calls(
+            [
+                call("id1"),
+                call(
+                    "id2",
+                ),
+            ]
+        )
+
+    @patch.multiple(proxmox_sdn.ProxmoxSDNAnsible, create_zone=DEFAULT, apply_changes=DEFAULT)
+    def test_module_exits_changed_when_apply_true(self, create_zone: MagicMock, apply_changes: MagicMock):
         set_module_args(
             {
                 **_api_args,
@@ -282,7 +312,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
                 "apply": True,
             }
         )
-        create_zone_mock.return_value = True
+        create_zone.return_value = True
 
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
@@ -291,7 +321,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
 
         assert result["changed"] is True
         assert result["msg"] == "Zone exists successfully created.\nPending changes applied."
-        assert apply_changes_mock.call_count == 1
+        assert apply_changes.call_count == 1
 
     def test_create_zone_return_false_sdn_exists(self):
         self.is_sdn_existing_mock.return_value = True

@@ -40,9 +40,9 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         """Check whether sdn has vnets
 
         :param sdnid: str - name of the sdn
-        :return: bool - is sdn empty?
+        :return: list of vnets
         """
-        return not any(vnet["zone"] == sdnid for vnet in self.proxmox_api.cluster.sdn.vnets.get())
+        return [vnet for vnet in self.proxmox_api.cluster.sdn.vnets.get() if vnet["zone"] == sdnid]
 
     def create_zone(self, zone, update, apply):
         """Create Proxmox VE sdn
@@ -76,7 +76,15 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
 
         return True
 
-    def delete_zone(self, sdnid):
+    def delete_vnet(self, vnetid):
+        if not self.is_vnet_existing(vnetid):
+            self.module.exit_json(changed=False, id=vnetid, msg="vnet {0} doesn't exist".format(vnetid))
+        try:
+            self.proxmox_api.cluster.sdn.vnets(vnetid).delete()
+        except Exception as e:
+            self.module.fail_json(msg="Failed to delete vnet with ID {0}: {1}".format(vnetid, e))
+
+    def delete_zone(self, force, sdnid):
         """Delete Proxmox VE sdn
 
         :param sdnid: str - name of the sdn
@@ -85,15 +93,21 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         if not self.is_sdn_existing(sdnid):
             self.module.exit_json(changed=False, id=sdnid, msg="sdn {0} doesn't exist".format(sdnid))
 
-        if self.is_sdn_empty(sdnid):
-            try:
-                self.proxmox_api.cluster.sdn.zones(sdnid).delete()
-            except Exception as e:
-                self.module.fail_json(msg="Failed to delete sdn with ID {0}: {1}".format(sdnid, e))
-        else:
+        vnets = self.is_sdn_empty(sdnid)
+        print(vnets)
+        if force and vnets:
+            for vnet in vnets:
+                self.delete_vnet(vnet["vnet"])
+        elif not force and vnets:
             self.module.fail_json(
-                msg="Can't delete sdn {0} with vnets. Please remove vnets from sdn first.".format(sdnid)
+                msg="Can't delete sdn {0} with vnets. Please remove vnets from sdn first or use `force: True`.".format(
+                    sdnid
+                )
             )
+        try:
+            self.proxmox_api.cluster.sdn.zones(sdnid).delete()
+        except Exception as e:
+            self.module.fail_json(msg="Failed to delete sdn with ID {0}: {1}".format(sdnid, e))
 
     def is_vnet_existing(self, vnet_id):
         try:
@@ -102,7 +116,7 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         except Exception as e:
             self.module.fail_json(msg="Unable to retrieve vnets: {0}".format(e))
 
-    def create_vnet(self, vnet, zone, alias=None, tag=None, type=None, vlanaware=False,update=False, apply=False):
+    def create_vnet(self, vnet, zone, alias=None, tag=None, type=None, vlanaware=False, update=False, apply=False):
         if not self.is_sdn_existing(zone):
             self.module.fail_json(msg="SDN {0} doesn't exist".format(zone))
         if self.is_vnet_existing(vnet):
@@ -149,6 +163,7 @@ def main():
         state=dict(default="present", choices=["present", "absent"]),
         update=dict(default=False, type="bool"),
         apply=dict(default=False, type="bool"),
+        force=dict(default=False, type="bool"),  # force recursive delete
         timeout=dict(type="int", default=30),
         zone=dict(
             type="dict",
@@ -241,14 +256,34 @@ def main():
             msgs.append("Pending changes applied.")
         if not pending_changes:
             msgs.append("Everything is up to date.")
-        module.exit_json(applied=apply, pending=pending_changes, **data, msg="\n".join(msgs))
+        module.exit_json(applied=apply, **data, msg="\n".join(msgs))
 
     else:
-        proxmox.delete_zone(zone["id"])
-        proxmox.apply_changes()
-        module.exit_json(
-            changed=True, id=zone["id"], applied=apply, msg="Zone {0} successfully deleted".format(zone["id"])
-        )
+        if vnet:
+            proxmox.delete_vnet(vnet["id"])
+            # get vnet info's to check for pending changes
+            vnet_info = proxmox.proxmox_api.cluster.sdn.vnets(vnet["id"]).get(pending="1")
+            state = vnet_info.get("state")
+            if state:
+                pending_changes = True
+                msgs.append("Vnet {0} deleted".format(vnet["id"]))
+
+        if zone:
+            proxmox.delete_zone(module.params["force"], zone["id"])
+            # get zone info's to check for pending changes
+            zone_info = proxmox.proxmox_api.cluster.sdn.zones(zone["id"]).get(pending="1")
+            state = zone_info.get("state")
+            if state:
+                pending_changes = True
+                msgs.append("Zone {0} deleted".format(zone["id"]))
+        data["changed"] = pending_changes
+        if pending_changes and apply:
+            proxmox.apply_changes()
+            msgs.append("Pending changes applied.")
+        if not pending_changes:
+            msgs.append("Everything is up to date.")
+
+        module.exit_json(applied=apply, **data, msg="\n".join(msgs))
 
 
 if __name__ == "__main__":
