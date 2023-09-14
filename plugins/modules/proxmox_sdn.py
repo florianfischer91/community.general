@@ -23,34 +23,19 @@ sdn_object_id = re.compile(r"^[a-z][a-z0-9]*$")
 
 
 class ProxmoxSDNAnsible(ProxmoxAnsible):
-    def is_sdn_existing(self, sdnid):
-        """Check whether sdn already exist
-
-        :param sdnid: str - name of the sdn
-        :return: bool - is sdn exists?
-        """
+    def get_zone(self, zone):
         try:
-            sdns = self.proxmox_api.cluster.sdn.zones.get()
-            return any(sdn["zone"] == sdnid for sdn in sdns)
+            zones = self.proxmox_api.cluster.sdn.zones.get()
+            return next((z for z in zones if z["zone"] == zone), None)
         except Exception as e:
-            self.module.fail_json(msg="Unable to retrieve sdns: {0}".format(e))
+            self.module.fail_json(msg="Unable to retrieve zone: {0}".format(e))
 
-    def is_sdn_empty(self, sdnid):
-        """Check whether sdn has vnets
-
-        :param sdnid: str - name of the sdn
-        :return: list of vnets
-        """
-        return [vnet for vnet in self.proxmox_api.cluster.sdn.vnets.get() if vnet["zone"] == sdnid]
+    def get_vnets_of_zone(self, zone):
+        return [vnet for vnet in self.proxmox_api.cluster.sdn.vnets.get() if vnet["zone"] == zone]
 
     def create_zone(self, zone, update, apply):
-        """Create Proxmox VE sdn
-
-        :param sdnid: str - name of the sdn
-        :return: True if we have created or potential changed a zone
-        """
         zone_exists = False
-        if self.is_sdn_existing(zone["id"]):
+        if self.get_zone(zone["id"]):
             # Ugly ifs
             if not update and not apply:
                 self.module.exit_json(changed=False, id=zone["id"], msg="sdn {0} already exists".format(zone["id"]))
@@ -75,50 +60,45 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
 
         return True
 
-    def delete_vnet(self, vnetid):
-        if not self.is_vnet_existing(vnetid):
-            self.module.exit_json(changed=False, id=vnetid, msg="vnet {0} doesn't exist".format(vnetid))
+    def delete_vnet(self, vnet):
+        if not self.get_vnet(vnet):
+            self.module.exit_json(changed=False, id=vnet, msg="vnet {0} doesn't exist".format(vnet))
         try:
-            self.proxmox_api.cluster.sdn.vnets(vnetid).delete()
+            self.proxmox_api.cluster.sdn.vnets(vnet).delete()
         except Exception as e:
-            self.module.fail_json(msg="Failed to delete vnet with ID {0}: {1}".format(vnetid, e))
+            self.module.fail_json(msg="Failed to delete vnet with ID {0}: {1}".format(vnet, e))
 
-    def delete_zone(self, force, sdnid):
-        """Delete Proxmox VE sdn
+    def delete_zone(self, force, zone):
+        if not self.get_zone(zone):
+            self.module.exit_json(changed=False, id=zone, msg="Zone {0} doesn't exist".format(zone))
 
-        :param sdnid: str - name of the sdn
-        :return: None
-        """
-        if not self.is_sdn_existing(sdnid):
-            self.module.exit_json(changed=False, id=sdnid, msg="sdn {0} doesn't exist".format(sdnid))
-
-        vnets = self.is_sdn_empty(sdnid)
+        vnets = self.get_vnets_of_zone(zone)
 
         if force and vnets:
             for vnet in vnets:
                 self.delete_vnet(vnet["vnet"])
         elif not force and vnets:
             self.module.fail_json(
-                msg="Can't delete sdn {0} with vnets. Please remove vnets from sdn first or use `force: True`.".format(
-                    sdnid
+                msg="Can't delete zone {0} with vnets. Please remove vnets from zone first or use `force: True`.".format(
+                    zone
                 )
             )
         try:
-            self.proxmox_api.cluster.sdn.zones(sdnid).delete()
+            self.proxmox_api.cluster.sdn.zones(zone).delete()
         except Exception as e:
-            self.module.fail_json(msg="Failed to delete sdn with ID {0}: {1}".format(sdnid, e))
+            self.module.fail_json(msg="Failed to delete zone with ID {0}: {1}".format(zone, e))
 
-    def is_vnet_existing(self, vnet_id):
+    def get_vnet(self, vnet):
         try:
             vnets = self.proxmox_api.cluster.sdn.vnets.get()
-            return next((vnet for vnet in vnets if vnet["vnet"] == vnet_id), None)
+            return next((v for v in vnets if v["vnet"] == vnet), None)
         except Exception as e:
-            self.module.fail_json(msg="Unable to retrieve vnets: {0}".format(e))
+            self.module.fail_json(msg="Unable to retrieve vnet: {0}".format(e))
 
     def create_vnet(self, vnet, zone, alias=None, tag=None, type=None, vlanaware=False, update=False, apply=False):
-        if not self.is_sdn_existing(zone):
-            self.module.fail_json(msg="SDN {0} doesn't exist".format(zone))
-        if self.is_vnet_existing(vnet):
+        if not self.get_zone(zone):
+            self.module.fail_json(msg="Zone {0} doesn't exist".format(zone))
+        if self.get_vnet(vnet):
             # Ugly ifs
             if not update and not apply:
                 self.module.exit_json(changed=False, id=vnet, msg="Vnet {0} already exists".format(vnet))
@@ -138,20 +118,15 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
             )
         return True
 
-    def is_subnet_existing(self, cidr, vnet):
-        """Check whether sdn already exist
-
-        :param sdnid: str - name of the sdn
-        :return: bool - is sdn exists?
-        """
+    def get_subnet(self, cidr, vnet):
         try:
             sdns = self.proxmox_api.cluster.sdn.vnets(vnet).subnets.get(pending="1")
             return next((sdn for sdn in sdns if sdn["cidr"] == cidr), None)
         except Exception as e:
-            self.module.fail_json(msg="Unable to retrieve sdns: {0}".format(e))
+            self.module.fail_json(msg="Unable to retrieve subnet: {0}".format(e))
 
     def delete_subnet(self, subnet, vnet):
-        subnet_obj = self.is_subnet_existing(subnet, vnet)
+        subnet_obj = self.get_subnet(subnet, vnet)
         if not subnet_obj:
             self.module.exit_json(changed=False, id=subnet, msg="Subnet {0} doesn't exist".format(subnet))
         try:
@@ -159,14 +134,12 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         except Exception as e:
             self.module.fail_json(msg="Failed to delete subnet with ID {0}: {1}".format(subnet, e))
 
-    def create_subnet(self, cidr, vnet, dnszoneprefix=None, gateway=None, snat=False, update=False, apply=False):
-        vnet_object = self.is_vnet_existing(vnet)
+    def create_subnet(self, cidr, vnet, data, update=False, apply=False):
+        vnet_object = self.get_vnet(vnet)
         if not vnet_object:
             self.module.fail_json(msg="Vnet {0} doesn't exist".format(vnet))
 
-        # addr, _ = ipaddress.IPv4Network._split_addr_prefix(cidr)
-        # name = f"{vnet_object['zone']}-{addr}-{ip_nw.prefixlen}"
-        subnet = self.is_subnet_existing(cidr, vnet)
+        subnet = self.get_subnet(cidr, vnet)
         if subnet:
             # Ugly ifs
             if not update and not apply:
@@ -174,28 +147,10 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
             if not update and apply:
                 return False
 
-        # if not sdn_object_id.match(vnet):  # TODO should we do the check before creating zone
-        #     self.module.fail_json(msg="{0} is not a valid sdn object identifier".format(vnet))
-
         if update:
-            self.proxmox_api.cluster.sdn.vnets(vnet).subnets(subnet["subnet"]).set(
-                vnet=vnet,
-                # cidr=cidr,
-                # subnet=cidr,
-                dnszoneprefix=dnszoneprefix,
-                gateway=gateway,
-                snat=ansible_to_proxmox_bool(snat),
-            )
+            self.proxmox_api.cluster.sdn.vnets(vnet).subnets(subnet["subnet"]).set(vnet=vnet, **data)
         else:
-            self.proxmox_api.cluster.sdn.vnets(vnet).subnets.post(
-                subnet=cidr,
-                type="subnet",
-                # cidr=cidr,
-                vnet=vnet,
-                dnszoneprefix=dnszoneprefix,
-                gateway=gateway,
-                snat=ansible_to_proxmox_bool(snat),
-            )
+            self.proxmox_api.cluster.sdn.vnets(vnet).subnets.post(subnet=cidr, type="subnet", vnet=vnet, **data)
         return True
 
     def apply_changes(self):
@@ -278,10 +233,12 @@ def main():
     pending_changes = False
 
     if subnet:
+        cidr = subnet.pop("cidr")
+        subnet_vnet = subnet.pop("vnet")
         try:
-            _ = ipaddress.ip_network(subnet["cidr"], False)
+            _ = ipaddress.ip_network(cidr, False)
         except e:
-            module.fail_json(msg=f"{subnet['cidr']} not a valid CIDR")
+            module.fail_json(msg=f"{cidr} not a valid CIDR")
 
     if state == "present":
         try:
@@ -322,24 +279,17 @@ def main():
                         msgs.append("Vnet {0} successfully {1}.".format(vnet["id"], "updated" if update else "created"))
 
             if subnet:
+                subnet["snat"] = ansible_to_proxmox_bool(subnet["snat"])
                 check_changes = proxmox.create_subnet(
-                    cidr=subnet["cidr"],
-                    vnet=subnet["vnet"],
-                    dnszoneprefix=subnet["dnszoneprefix"],
-                    gateway=subnet["gateway"],
-                    snat=subnet["snat"],
-                    update=update,
-                    apply=apply,
+                    cidr=cidr, vnet=subnet_vnet, data=subnet, update=update, apply=apply
                 )
                 if check_changes:
                     # get subnet info's to check for pending changes
-                    subnet_info = proxmox.is_subnet_existing(subnet["cidr"], subnet["vnet"])
-                    state = subnet_info.get("state", "")
+                    subnet_info = proxmox.get_subnet(cidr, subnet_vnet)
+                    state = subnet_info.get("state")
                     if state:
                         pending_changes = True
-                        msgs.append(
-                            "Subnet {0} successfully {1}.".format(subnet["cidr"], "updated" if update else "created")
-                        )
+                        msgs.append("Subnet {0} successfully {1}.".format(cidr, "updated" if update else "created"))
 
         except ResourceException as e:
             if update:
@@ -357,13 +307,13 @@ def main():
 
     else:
         if subnet:
-            proxmox.delete_subnet(subnet["cidr"], subnet["vnet"])
-            subnet_info = proxmox.is_subnet_existing(subnet["cidr"], subnet["vnet"])
+            proxmox.delete_subnet(cidr, subnet_vnet)
+            subnet_info = proxmox.get_subnet(cidr, subnet_vnet)
             if subnet_info:  # can be none if subnet was in 'new' state before and is now deleted
                 state = subnet_info.get("state")
                 if state:
                     pending_changes = True
-                    msgs.append("Subnet {0} deleted".format(subnet["cidr"]))
+                    msgs.append("Subnet {0} deleted".format(cidr))
 
         if vnet:
             proxmox.delete_vnet(vnet["id"])
