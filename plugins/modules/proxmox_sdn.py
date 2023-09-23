@@ -38,14 +38,8 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
     def create_zone(self, zone, update, apply):
         zone_exists = False
         if self.get_zone(zone["id"]):
-            # Ugly ifs
             if not update:
                 return False
-            # if not update and not apply:
-            #     return False
-            #     self.module.exit_json(changed=False, id=zone["id"], msg="sdn {0} already exists".format(zone["id"]))
-            # if not update and apply:
-            #     return False
             zone_exists = True
 
         zone_copy = dict(**zone)
@@ -113,17 +107,17 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
             self.module.fail_json(msg="Unable to retrieve vnet: {0}".format(e))
 
     def create_vnet(self, vnet, zone, alias=None, tag=None, type=None, vlanaware=False, update=False, apply=False):
+        vnet_exists = False
         if not self.get_zone(zone):
             self.module.fail_json(msg="Zone {0} doesn't exist".format(zone))
         if self.get_vnet(vnet):
-            # Ugly ifs
-            if not update and not apply:
+            if not update:
                 return False
-                # self.module.exit_json(changed=False, id=vnet, msg="Vnet {0} already exists".format(vnet))
-            if not update and apply:
-                return False
+            vnet_exists = True
 
         if update:
+            if not vnet_exists:
+                self.module.fail_json(msg="Vnet object {0} does not exist".format(vnet))
             self.proxmox_api.cluster.sdn.vnets(vnet).set(
                 zone=zone, alias=alias, tag=tag, type=type, vlanaware=ansible_to_proxmox_bool(vlanaware)
             )
@@ -157,17 +151,16 @@ class ProxmoxSDNAnsible(ProxmoxAnsible):
         vnet_object = self.get_vnet(vnet)
         if not vnet_object:
             self.module.fail_json(msg="Vnet {0} doesn't exist".format(vnet))
-
+        subnet_exists = False
         subnet = self.get_subnet(cidr, vnet)
         if subnet:
-            # Ugly ifs
-            if not update and not apply:
+            if not update:
                 return False
-                # self.module.exit_json(changed=False, id=vnet, msg="Subnet {0} does already exist".format(cidr))
-            if not update and apply:
-                return False
+            subnet_exists = True
 
         if update:
+            if not subnet_exists:
+                self.module.fail_json(msg="Subnet object {0} does not exist".format(cidr))
             self.proxmox_api.cluster.sdn.vnets(vnet).subnets(subnet["subnet"]).set(vnet=vnet, **data)
         else:
             self.proxmox_api.cluster.sdn.vnets(vnet).subnets.post(subnet=cidr, type="subnet", vnet=vnet, **data)
@@ -215,7 +208,6 @@ def main():
                 zone=dict(type="str", required=True),
                 alias=dict(type="str"),
                 tag=dict(type="int"),
-                # type=dict(type="str"), # defined in api-doc but proxmox doesn't allow it
                 vlanaware=dict(type="bool"),
             ),
         ),
@@ -276,12 +268,6 @@ def main():
         if state == "present":
             if zone:
                 created_or_updated = proxmox.create_zone(zone=zone, update=update, apply=apply)
-                # if check_changes:
-                # get zone info's to check for pending changes
-                # zone_info = proxmox.proxmox_api.cluster.sdn.zones(zone_id).get(pending="1")
-                # zone_state = zone_info.get("state")
-                # if zone_state:
-                #     pending_changes = True
                 if created_or_updated:
                     pending_changes = True
                     msgs.append("Zone {0} successfully {1}.".format(zone["id"], "updated" if update else "created"))
@@ -300,11 +286,6 @@ def main():
                     update=update,
                 )
                 if check_changes:
-                    # get vnet info's to check for pending changes
-                    # vnet_info = proxmox.proxmox_api.cluster.sdn.vnets(vnet["id"]).get(pending="1")
-                    # state = vnet_info.get("state")
-                    # if state:
-                    #     pending_changes = True
                     pending_changes = True
                     msgs.append("Vnet {0} successfully {1}.".format(vnet["id"], "updated" if update else "created"))
                 else:
@@ -316,11 +297,6 @@ def main():
                     cidr=cidr, vnet=subnet_vnet, data=subnet, update=update, apply=apply
                 )
                 if check_changes:
-                    # get subnet info's to check for pending changes
-                    # subnet_info = proxmox.get_subnet(cidr, subnet_vnet)
-                    # state = subnet_info.get("state")
-                    # if state:
-                    #     pending_changes = True
                     pending_changes = True
                     msgs.append("Subnet {0} successfully {1}.".format(cidr, "updated" if update else "created"))
                 else:
@@ -332,39 +308,25 @@ def main():
                 if not check_changes:
                     msgs.append("Subnet '{0}' of vnet {1} is already absent".format(cidr, subnet_vnet))
                 else:
-                    # subnet_info = proxmox.get_subnet(cidr, subnet_vnet)
-                    # if subnet_info:  # can be none if subnet was in 'new' state before and is now deleted
-                    #     state = subnet_info.get("state")
-                    #     if state:
                     pending_changes = True
                     msgs.append("Subnet {0} of {1} deleted.".format(cidr, subnet_vnet))
 
             if vnet:
                 check_changes_vnet = proxmox.delete_vnet(module.params["force"], vnet["id"])
-                if not check_changes_vnet:
-                    msgs.append("Vnet '{0}' is already absent".format(vnet["id"]))
-                else:
-                    # get vnet info's to check for pending changes
-                    # vnet_info = proxmox.proxmox_api.cluster.sdn.vnets(vnet["id"]).get(pending="1")
-                    # state = vnet_info.get("state")
-                    # if state:
+                if check_changes_vnet:
                     pending_changes = True
                     msgs.append("Vnet {0} deleted.".format(vnet["id"]))
+                else:
+                    msgs.append("Vnet '{0}' is already absent".format(vnet["id"]))
 
             if zone:
                 check_changes = proxmox.delete_zone(module.params["force"], zone_id)
-                if not check_changes:
-                    msgs.append("Zone '{0}' is already absent".format(zone_id))
-                else:
-                    # get zone info's to check for pending changes
-                    # zone_info = proxmox.proxmox_api.cluster.sdn.zones(zone_id).get(pending="1")
-                    # state = zone_info.get("state")
-                    # if state:
+                if check_changes:
                     pending_changes = True
                     msgs.append("Zone {0} deleted.".format(zone_id))
+                else:
+                    msgs.append("Zone '{0}' is already absent".format(zone_id))
 
-        # if we have pending changes, we have changed something
-        # if pending_changes:
         if apply:
             if not pending_changes:
                 zone_info = proxmox.proxmox_api.cluster.sdn.zones.get(pending="1")
@@ -382,13 +344,9 @@ def main():
                 proxmox.apply_changes()
                 msgs.append("Pending changes applied.")
             else:
-                # msgs.append(zone_info)
                 msgs.append("No pending changes detected.")
-        # else:
-        #     msgs.append("Pending changes not applied.")
+
         data["changed"] = pending_changes
-        # else:
-        #     msgs.append("Everything is up to date.")
 
         module.exit_json(**data, msg=" ".join(msgs))
 

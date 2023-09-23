@@ -12,6 +12,7 @@ __metaclass__ = type
 import sys
 
 import pytest
+import time
 
 proxmoxer = pytest.importorskip("proxmoxer")
 mandatory_py_version = pytest.mark.skipif(
@@ -45,9 +46,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
         super(TestProxmoxSdnModule, self).setUp()
         proxmox_utils.HAS_PROXMOXER = True
         self.module = proxmox_sdn
-        self.connect_mock = patch(
-            "ansible_collections.community.general.plugins.module_utils.proxmox.ProxmoxAnsible._connect"
-        ).start()
+        self.connect_mock = patch.object(proxmox_utils.ProxmoxAnsible, "_connect").start()
         self.get_node_mock = patch.object(proxmox_utils.ProxmoxAnsible, "get_node").start()
         self.get_zone_mock = patch.object(proxmox_sdn.ProxmoxSDNAnsible, "get_zone").start()
         self.get_vnet_mock = patch.object(proxmox_sdn.ProxmoxSDNAnsible, "get_vnet").start()
@@ -66,21 +65,13 @@ class TestProxmoxSdnModule(ModuleTestCase):
             self.module.main()
 
     def test_module_exits_unchanged_when_provided_zone_id_exists(self):
-        set_module_args(
-            {
-                **_api_args,
-                "zone": {
-                    "id": "test",
-                    "type": "simple",
-                },
-            }
-        )
+        set_module_args({**_api_args, "zone": {"id": "test", "type": "simple"}})
         self.get_zone_mock.return_value = True
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
 
-        assert self.get_zone_mock.call_count == 1
         result = exc_info.value.args[0]
+        self.get_zone_mock.assert_called_once()
         assert result["changed"] is False
         assert result["msg"] == "Zone test already exists."
 
@@ -98,7 +89,6 @@ class TestProxmoxSdnModule(ModuleTestCase):
             with pytest.raises(AnsibleFailJson) as exc_info:
                 self.module.main()
 
-            # assert self.get_zone_mock.call_count == 1
             result = exc_info.value.args[0]
             assert result["failed"] is True
             assert result["msg"] == msg
@@ -138,13 +128,9 @@ class TestProxmoxSdnModule(ModuleTestCase):
 
         assert result["changed"] is True
         assert result["msg"] == "Zone test successfully created."
-        assert self.get_zone_mock.call_count == 1
+        self.get_zone_mock.assert_called_once()
         post_zones.assert_called_once_with(zone="test", type="vlan", bridge="vmbr0", mtu="1450")
-        assert apply_changes_mock.call_count == 0
-
-    # def test_module_exits_changed_when_zone_updated(self):
-    #     self._test_module_exits_changed_when_zone_updated("changed", True, "Zone exists successfully updated.")
-    #     self._test_module_exits_changed_when_zone_updated("", False, "Everything is up to date.")
+        apply_changes_mock.assert_not_called()
 
     def test_module_exits_changed_when_zone_updated(self):
         set_module_args(
@@ -166,24 +152,13 @@ class TestProxmoxSdnModule(ModuleTestCase):
         result = exc_info.value.args[0]
 
         assert result["changed"] is True
-        # assert zones_mock.return_value.get.call_count ==1 #.assert_called_once_with(pending="1")
         assert result["msg"] == "Zone exists successfully updated."
-        assert self.get_zone_mock.call_count == 1
-        assert zones_mock.call_count == 1
-        zones_mock.assert_called_with("exists")
+        self.get_zone_mock.assert_called_once()
+        zones_mock.assert_called_once_with("exists")
         zones_mock.return_value.set.assert_called_once_with(bridge="vmbr0", mtu="1450")
 
-        zones_mock.reset_mock()
-        self.get_zone_mock.reset_mock()
-
     def test_module_exits_failed_when_zone_updated_does_not_exist(self):
-        set_module_args(
-            {
-                **_api_args,
-                "zone": {"id": "exists", "type": "vlan", "bridge": "vmbr0"},
-                "update": True,
-            }
-        )
+        set_module_args({**_api_args, "zone": {"id": "exists", "type": "vlan", "bridge": "vmbr0"}, "update": True})
 
         self.get_zone_mock.return_value = False
 
@@ -194,16 +169,10 @@ class TestProxmoxSdnModule(ModuleTestCase):
 
         assert result["failed"] is True
         assert result["msg"] == "Zone object exists does not exist"
-        assert self.get_zone_mock.call_count == 1
+        self.get_zone_mock.assert_called_once()
 
     def test_module_exits_changed_when_zone_deleted(self):
-        set_module_args(
-            {
-                **_api_args,
-                "zone": {"id": "exists"},
-                "state": "absent",
-            }
-        )
+        set_module_args({**_api_args, "zone": {"id": "exists"}, "state": "absent"})
 
         self.get_zone_mock.return_value = {"key": "value"}
         zones_mock: MagicMock = self.connect_mock.return_value.cluster.sdn.zones
@@ -215,26 +184,17 @@ class TestProxmoxSdnModule(ModuleTestCase):
 
         assert result["changed"] is True
         assert result["msg"] == "Zone exists deleted."
-        assert self.get_zone_mock.call_count == 1
+        self.get_zone_mock.assert_called_once()
         assert zones_mock.call_args_list == [call("exists")]
-        assert zones_mock.return_value.delete.call_count == 1
+        zones_mock.return_value.delete.assert_called_once()
 
     def test_module_exits_failed_when_zone_deleted_exception_raised(self):
-        set_module_args(
-            {
-                **_api_args,
-                "zone": {"id": "exists"},
-                "state": "absent",
-            }
-        )
+        set_module_args({**_api_args, "zone": {"id": "exists"}, "state": "absent"})
 
         self.get_zone_mock.return_value = {"random-key": "random-value"}
         zones_mock = self.connect_mock.return_value.cluster.sdn.zones
 
-        def raise_():
-            raise Exception("My Exception")
-
-        zones_mock.return_value.delete.side_effect = raise_
+        zones_mock.return_value.delete.side_effect = _raise
 
         with pytest.raises(AnsibleFailJson) as exc_info:
             self.module.main()
@@ -245,13 +205,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
         assert result["msg"] == "Failed to delete zone with ID exists: My Exception"
 
     def test_module_exits_unchanged_when_zone_deleted_does_not_exist(self):
-        set_module_args(
-            {
-                **_api_args,
-                "zone": {"id": "exists"},
-                "state": "absent",
-            }
-        )
+        set_module_args({**_api_args, "zone": {"id": "exists"}, "state": "absent"})
 
         self.get_zone_mock.return_value = None
 
@@ -262,16 +216,10 @@ class TestProxmoxSdnModule(ModuleTestCase):
 
         assert result["changed"] is False
         assert result["msg"] == "Zone 'exists' is already absent"
-        assert self.get_zone_mock.call_count == 1
+        self.get_zone_mock.assert_called_once()
 
     def test_module_exits_failed_when_zone_deleted_not_empty(self):
-        set_module_args(
-            {
-                **_api_args,
-                "zone": {"id": "exists"},
-                "state": "absent",
-            }
-        )
+        set_module_args({**_api_args, "zone": {"id": "exists"}, "state": "absent"})
 
         self.get_zone_mock.return_value = {"key": "value"}
 
@@ -287,7 +235,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
             result["msg"]
             == "Can't delete zone exists with vnets. Please remove vnets from zone first or use `force: True`."
         )
-        assert self.get_zone_mock.call_count == 1
+        self.get_zone_mock.assert_called_once()
         get_vnets_of_zone_mock.assert_called_once_with("exists")
 
     @patch.multiple(proxmox_sdn.ProxmoxSDNAnsible, get_vnets_of_zone=DEFAULT, delete_vnet=DEFAULT)
@@ -305,19 +253,13 @@ class TestProxmoxSdnModule(ModuleTestCase):
         result = exc_info.value.args[0]
 
         assert result["changed"] is True
-        # assert result["msg"] == "Can't delete sdn exists with vnets. Please remove vnets from sdn first or use `force: True`."
-        assert self.get_zone_mock.call_count == 1
+        self.get_zone_mock.assert_called_once()
         get_vnets_of_zone.assert_called_once_with("exists")
         delete_vnet.assert_has_calls([call(True, "id1"), call(True, "id2")])
 
     @patch.object(proxmox_sdn.ProxmoxSDNAnsible, "apply_changes")
     def test_module_exits_changed_when_apply_changes(self, apply_changes: MagicMock):
-        set_module_args(
-            {
-                **_api_args,
-                "apply": True,
-            }
-        )
+        set_module_args({**_api_args, "apply": True})
         get_zone: MagicMock = self.connect_mock.return_value.cluster.sdn.zones.get
         get_vnets: MagicMock = self.connect_mock.return_value.cluster.sdn.vnets.get
         get_vnets.return_value = [{"vnet": "myvnet"}]
@@ -332,7 +274,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
         get_zone.assert_called_once()
         self.get_subnets_of_vnet_mock.assert_called_once_with("myvnet")
         self.get_subnets_of_vnet_mock.assert_called_once()
-        assert apply_changes.call_count == 1
+        apply_changes.assert_called_once()
 
     def test_create_zone_return_false_sdn_exists(self):
         self.get_zone_mock.return_value = True
@@ -352,9 +294,9 @@ class TestProxmoxSdnModule(ModuleTestCase):
         with pytest.raises(AnsibleFailJson) as exc_info:
             self.module.main()
 
-        self.get_zone_mock.assert_called_once_with("simple")
-        # assert self.get_vnet_mock.call_count == 1
         result = exc_info.value.args[0]
+
+        self.get_zone_mock.assert_called_once_with("simple")
         assert result["failed"] is True
         assert result["msg"] == "Zone simple doesn't exist"
 
@@ -370,54 +312,40 @@ class TestProxmoxSdnModule(ModuleTestCase):
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
 
-        assert self.get_zone_mock.call_count == 1
-        assert self.get_vnet_mock.call_count == 1
         result = exc_info.value.args[0]
+        self.get_zone_mock.assert_called_once()
+        self.get_vnet_mock.assert_called_once()
         assert result["changed"] is False
         assert result["msg"] == "Vnet test already exists."
-        # assert result["id"] == "test"
 
     @patch.object(proxmox_sdn.ProxmoxSDNAnsible, "apply_changes")
     def test_module_exits_unchanged_when_vnet_exists_no_update_apply(self, apply_changes_mock: MagicMock):
-        set_module_args(
-            {
-                **_api_args,
-                "vnet": {"id": "test", "zone": "simple"},
-                "apply": True,
-            }
-        )
+        set_module_args({**_api_args, "vnet": {"id": "test", "zone": "simple"}, "apply": True})
         self.get_zone_mock.return_value = True
         self.get_vnet_mock.return_value = True
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
 
-        assert self.get_zone_mock.call_count == 1
-        assert self.get_vnet_mock.call_count == 1
         result = exc_info.value.args[0]
+        self.get_zone_mock.assert_called_once()
+        self.get_vnet_mock.assert_called_once()
         assert result["changed"] is False
         assert result["msg"] == "Vnet test already exists. No pending changes detected."
         apply_changes_mock.assert_not_called()
 
     def test_module_exits_changed_when_vnet_update(self):
-        set_module_args(
-            {
-                **_api_args,
-                "vnet": {"id": "test", "zone": "simple"},
-                "update": True,
-            }
-        )
+        set_module_args({**_api_args, "vnet": {"id": "test", "zone": "simple"}, "update": True})
         self.get_zone_mock.return_value = True
         self.get_vnet_mock.return_value = True
         vnet_mock: MagicMock = self.connect_mock.return_value.cluster.sdn.vnets
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
 
-        assert self.get_zone_mock.call_count == 1
-        assert self.get_vnet_mock.call_count == 1
         result = exc_info.value.args[0]
+        self.get_zone_mock.assert_called_once()
+        self.get_vnet_mock.assert_called_once()
         assert result["changed"] is True
         vnet_mock.assert_called_once_with("test")
-        # assert vnet_mock.call_count == 2
         vnet_mock.return_value.set.assert_called_once_with(
             zone="simple", alias=None, tag=None, type=None, vlanaware=None
         )
@@ -442,12 +370,10 @@ class TestProxmoxSdnModule(ModuleTestCase):
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
 
-        assert self.get_zone_mock.call_count == 1
-        assert self.get_vnet_mock.call_count == 1
         result = exc_info.value.args[0]
+        self.get_zone_mock.assert_called_once()
+        self.get_vnet_mock.assert_called_once()
         assert result["changed"] is True
-        # vnet_mock.assert_called_with("test")
-        # assert vnet_mock.call_count == 1
         vnet_mock.post.assert_called_once_with(
             vnet="test", zone="simple", alias="test123", tag=42, type=None, vlanaware=1
         )
@@ -465,8 +391,6 @@ class TestProxmoxSdnModule(ModuleTestCase):
         )
         self.get_vnet_mock.return_value = {}
         self.get_subnets_of_vnet_mock.return_value = [{"cidr": "sv1"}, {"cidr": "sv2"}, {"cidr": "sv3"}]
-        # self.get_zone_mock.return_value = {"key": "value"}
-        # zones_mock: MagicMock = self.connect_mock.return_value.cluster.sdn.zones
 
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
@@ -478,9 +402,6 @@ class TestProxmoxSdnModule(ModuleTestCase):
         self.get_vnet_mock.assert_called_once_with("exists", pending="1")
         self.connect_mock.return_value.cluster.sdn.vnets.return_value.delete.assert_called_once()
         delete_subnet_mock.assert_has_calls([call("sv1", "exists"), call("sv2", "exists"), call("sv3", "exists")])
-        # assert self.get_zone_mock.call_count == 1
-        # assert zones_mock.call_args_list == [call("exists")]
-        # assert zones_mock.return_value.delete.call_count == 1
 
     def test_module_exits_not_changed_when_vnet_deleted_does_not_exist(self):
         self._test_module_exits_not_changed_when_vnet_deleted_does_not_exist(None)
@@ -495,9 +416,6 @@ class TestProxmoxSdnModule(ModuleTestCase):
             }
         )
         self.get_vnet_mock.return_value = mock_ret
-        # self.get_subnets_of_vnet_mock.return_value = []
-        # self.get_zone_mock.return_value = {"key": "value"}
-        # zones_mock: MagicMock = self.connect_mock.return_value.cluster.sdn.zones
 
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
@@ -521,15 +439,14 @@ class TestProxmoxSdnModule(ModuleTestCase):
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
 
-        assert self.get_vnet_mock.call_count == 1
         result = exc_info.value.args[0]
+        self.get_vnet_mock.assert_called_once()
         assert result["changed"] is True
         assert result["msg"] == "Subnet 192.168.1.1/24 successfully created."
         self.get_vnet_mock.assert_called_once_with("myvnet")
         self.connect_mock.return_value.cluster.sdn.vnets.return_value.subnets.post.assert_called_once_with(
             subnet="192.168.1.1/24", type="subnet", vnet="myvnet", dnszoneprefix=None, gateway=None, snat=1
         )
-        # assert result["id"] == "test"
 
     @patch.object(proxmox_sdn.ProxmoxSDNAnsible, "get_subnet")
     def test_module_exits_not_changed_when_subnet_exists(self, get_subnet_mock: MagicMock):
@@ -546,9 +463,9 @@ class TestProxmoxSdnModule(ModuleTestCase):
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
 
-        assert self.get_vnet_mock.call_count == 1
-        get_subnet_mock.assert_called_once_with("192.168.1.1/24", "myvnet")
         result = exc_info.value.args[0]
+        self.get_vnet_mock.assert_called_once()
+        get_subnet_mock.assert_called_once_with("192.168.1.1/24", "myvnet")
         assert result["changed"] is False
         assert result["msg"] == "Subnet 192.168.1.1/24 of myvnet already exists."
         self.get_vnet_mock.assert_called_once_with("myvnet")
@@ -565,9 +482,8 @@ class TestProxmoxSdnModule(ModuleTestCase):
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
 
-        assert self.get_vnet_mock.call_count == 1
-        get_subnet_mock.assert_called_once_with("192.168.1.1/24", "myvnet")
         result = exc_info.value.args[0]
+        get_subnet_mock.assert_called_once_with("192.168.1.1/24", "myvnet")
         assert result["changed"] is True
         assert result["msg"] == "Subnet 192.168.1.1/24 successfully updated."
         self.get_vnet_mock.assert_called_once_with("myvnet")
@@ -584,14 +500,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
             {**_api_args, "subnet": {"cidr": "192.168.1.1/24", "vnet": "myvnet"}, "state": "absent", "apply": False}
         )
         get_subnet_mock.return_value = {"subnet": "subnet-name"}
-        # self.get_vnet_mock.return_value = { }
-        # self.get_subnets_of_vnet_mock.return_value = [{"cidr": "sv1"}, {"cidr": "sv2"}, {"cidr": "sv3"}]
-        # self.get_zone_mock.return_value = {"key": "value"}
-        # zones_mock: MagicMock = self.connect_mock.return_value.cluster.sdn.zones
 
-        # self.connect_mock.return_value.cluster.sdn.zones.get.return_value = []
-        # self.connect_mock.return_value.cluster.sdn.vnets.get.return_value = [{"vnet": "myvnet"}]
-        # self.get_subnets_of_vnet_mock.return_value = [{"state": "deleted"}]
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
 
@@ -601,9 +510,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
         assert result["msg"] == "Subnet 192.168.1.1/24 of myvnet deleted."
         get_subnet_mock.assert_called_once_with("192.168.1.1/24", "myvnet")
         self.connect_mock.return_value.cluster.sdn.vnets.return_value.subnets.return_value.delete.assert_called_once()
-
         apply_changes_mock.assert_not_called()
-        # delete_subnet_mock.assert_has_calls([call("sv1", "exists"), call("sv2", "exists"), call("sv3", "exists")])
 
     @patch.object(proxmox_sdn.ProxmoxSDNAnsible, "get_subnet")
     def test_module_exits_not_changed_when_subnet_deleted_does_not_exists(self, get_subnet_mock: MagicMock):
@@ -613,10 +520,6 @@ class TestProxmoxSdnModule(ModuleTestCase):
     def _test_module_exits_not_changed_when_subnet_deleted_does_not_exists(self, mock_ret, get_subnet_mock: MagicMock):
         set_module_args({**_api_args, "subnet": {"cidr": "192.168.1.1/24", "vnet": "myvnet"}, "state": "absent"})
         get_subnet_mock.return_value = mock_ret
-        # self.get_vnet_mock.return_value = { }
-        # self.get_subnets_of_vnet_mock.return_value = [{"cidr": "sv1"}, {"cidr": "sv2"}, {"cidr": "sv3"}]
-        # self.get_zone_mock.return_value = {"key": "value"}
-        # zones_mock: MagicMock = self.connect_mock.return_value.cluster.sdn.zones
 
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
@@ -627,7 +530,6 @@ class TestProxmoxSdnModule(ModuleTestCase):
         assert result["msg"] == "Subnet '192.168.1.1/24' of vnet myvnet is already absent"
         get_subnet_mock.assert_called_once_with("192.168.1.1/24", "myvnet")
         get_subnet_mock.reset_mock()
-        # self.connect_mock.return_value.cluster.sdn.vnets.return_value.subnets.return_value.delete.assert_called_once()
 
     @patch.object(proxmox_sdn.ProxmoxSDNAnsible, "get_subnet")
     @patch.object(proxmox_sdn.ProxmoxSDNAnsible, "apply_changes")
@@ -638,14 +540,7 @@ class TestProxmoxSdnModule(ModuleTestCase):
             {**_api_args, "subnet": {"cidr": "192.168.1.1/24", "vnet": "myvnet"}, "state": "absent", "apply": False}
         )
         get_subnet_mock.return_value = {"subnet": "subnet-name"}
-        # self.get_vnet_mock.return_value = { }
-        # self.get_subnets_of_vnet_mock.return_value = [{"cidr": "sv1"}, {"cidr": "sv2"}, {"cidr": "sv3"}]
-        # self.get_zone_mock.return_value = {"key": "value"}
-        # zones_mock: MagicMock = self.connect_mock.return_value.cluster.sdn.zones
 
-        # self.connect_mock.return_value.cluster.sdn.zones.get.return_value = []
-        # self.connect_mock.return_value.cluster.sdn.vnets.get.return_value = [{"vnet": "myvnet"}]
-        # self.get_subnets_of_vnet_mock.return_value = [{"state": "deleted"}]
         with pytest.raises(AnsibleExitJson) as exc_info:
             self.module.main()
 
@@ -657,7 +552,6 @@ class TestProxmoxSdnModule(ModuleTestCase):
         self.connect_mock.return_value.cluster.sdn.vnets.return_value.subnets.return_value.delete.assert_called_once()
 
         apply_changes_mock.assert_not_called()
-        # delete_subnet_mock.assert_has_calls([call("sv1", "exists"), call("sv2", "exists"), call("sv3", "exists")])
 
 
 # a couple of functions are mocked in the above testcase-class so we have to use separate functions to test it
@@ -765,17 +659,13 @@ def test_apply_changes(api_task_mock: MagicMock, connect_mock: MagicMock):
     connect_mock.return_value.cluster.sdn.set.return_value = 42
     connect_mock.return_value.cluster.resources.get.return_value = [{"node": 1}, {"node": 2}, {"node": 3}]
 
-    class _Module(_DummyModule):
-        params = {"timeout": 5}
+    _DummyModule.params = {"timeout": 5}
 
     api_task_mock.return_value = True
-    sut = proxmox_sdn.ProxmoxSDNAnsible(_Module())
+    sut = proxmox_sdn.ProxmoxSDNAnsible(_DummyModule())
     ret = sut.apply_changes()
     assert ret is None
     assert api_task_mock.call_count == 3
-
-
-import time
 
 
 @patch.object(proxmox_utils.ProxmoxAnsible, "_connect")
@@ -785,15 +675,13 @@ def test_apply_changes_fail(sleep_mock: MagicMock, api_task_mock: MagicMock, con
     connect_mock.return_value.cluster.sdn.set.return_value = 42
     connect_mock.return_value.cluster.resources.get.return_value = [{"node": 1}, {"node": 2}, {"node": 3}]
 
-    class _Module(_DummyModule):
-        params = {"timeout": 5}
+    _DummyModule.params = {"timeout": 5}
 
     api_task_mock.return_value = False
-    sut = proxmox_sdn.ProxmoxSDNAnsible(_Module())
+    sut = proxmox_sdn.ProxmoxSDNAnsible(_DummyModule())
     with pytest.raises(AnsibleFailJson) as exc_info:
         sut.apply_changes()
 
     result = exc_info.value.args[0]
     sleep_mock.assert_called()
-
     assert result["failed"] is True
