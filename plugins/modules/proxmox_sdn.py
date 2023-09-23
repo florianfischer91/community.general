@@ -258,7 +258,7 @@ def main():
         subnet_vnet = subnet.pop("vnet")
         try:
             _ = ipaddress.ip_network(cidr, False)
-        except e:
+        except Exception as e:
             module.fail_json(msg=f"{cidr} not a valid CIDR")
     if vnet:
         if not sdn_object_id.match(vnet["id"]):
